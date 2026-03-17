@@ -12,7 +12,8 @@ from typing import Any, Dict, Literal, Optional, Tuple
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
-
+from astrbot.core.message import components
+from astrbot.core.message.components import BaseMessageComponent
 
 # 语言别名映射 (基于 Google Translate 支持的语言)
 LANG_ALIASES: Dict[str, str] = {
@@ -391,7 +392,7 @@ class SmartTranslator(Star):
         # 检查是否是二次翻译失败的情况
         if not request.source_text:
             event.stop_event()
-            yield event.plain_result("⚠️ 二次翻译失败：翻译缓存已过期，请重新发送原文进行翻译。")
+            yield event.plain_result("⚠️ 翻译失败：未获取到原文")
             return
 
         # 匹配到翻译请求，拦截消息
@@ -434,23 +435,27 @@ class SmartTranslator(Star):
     def _get_cache_key(self, event: AstrMessageEvent) -> Optional[str]:
         """获取缓存键."""
         try:
-            # 尝试从 event 获取唯一标识
-            unified_id = getattr(event, "unified_msg_origin", None)
-            if unified_id:
-                return str(unified_id)
-            
-            session_id = getattr(event, "session_id", None)
-            if session_id:
-                return str(session_id)
-            
-            # 从 message_obj 获取 user_id
-            msg_obj = getattr(event, "message_obj", None)
-            if msg_obj:
-                sender = getattr(msg_obj, "sender", None)
-                if sender:
-                    user_id = getattr(sender, "user_id", None) or getattr(sender, "id", None)
-                    if user_id:
-                        return f"user:{user_id}"
+            message_id = event.message_obj.message_id
+            if message_id:
+                return str(message_id)
+            #
+            # # 尝试从 event 获取唯一标识
+            # unified_id = getattr(event, "unified_msg_origin", None)
+            # if unified_id:
+            #     return str(unified_id)
+            #
+            # session_id = getattr(event, "session_id", None)
+            # if session_id:
+            #     return str(session_id)
+            #
+            # # 从 message_obj 获取 user_id
+            # msg_obj = getattr(event, "message_obj", None)
+            # if msg_obj:
+            #     sender = getattr(msg_obj, "sender", None)
+            #     if sender:
+            #         user_id = getattr(sender, "user_id", None) or getattr(sender, "id", None)
+            #         if user_id:
+            #             return f"user:{user_id}"
         except Exception:
             pass
         return None
@@ -472,46 +477,10 @@ class SmartTranslator(Star):
         if not raw:
             return None
 
-        # 检测是否是引用/回复消息
-        # 方法1: 检查 message_str 格式（可能被 AstrBot 处理过）
-        is_quote_by_str = (
-            raw.startswith("[引用消息(") or 
-            raw.startswith("[CQ:reply,") or
-            "[CQ:reply," in raw
-        )
-        
-        # 方法2: 检查消息段（更可靠，因为 message_str 可能被处理过）
-        is_quote_by_chain = False
-        try:
-            msg_obj = getattr(event, "message_obj", None)
-            if msg_obj:
-                # 尝试多种属性名获取消息链
-                message_chain = None
-                for attr in ("message", "message_chain", "raw_message"):
-                    val = getattr(msg_obj, attr, None)
-                    if val and isinstance(val, (list, tuple)):
-                        message_chain = val
-                        break
-                
-                # 如果 msg_obj 本身就是列表
-                if not message_chain and isinstance(msg_obj, (list, tuple)):
-                    message_chain = msg_obj
-                
-                if message_chain:
-                    for seg in message_chain:
-                        seg_type = getattr(seg, "type", None) or (seg.get("type") if isinstance(seg, dict) else None)
-                        # 将类型转换为字符串进行比较（处理枚举类型如 ComponentType.Reply）
-                        seg_type_str = str(seg_type).lower()
-                        if any(t in seg_type_str for t in ("reply", "quote", "reference")):
-                            is_quote_by_chain = True
-                            break
-        except Exception as e:
-            logger.debug("检查消息段失败: %s", e)
-        
-        is_quote_message = is_quote_by_str or is_quote_by_chain
+        quote_message = self._get_reply_message(event)
 
-        # 1. 引用消息 + 翻译触发词 -> 二次翻译（用缓存的原文 + 新目标语言）
-        if is_quote_message:
+        # 1. 引用消息 + 翻译触发词 -> 翻译引文
+        if quote_message:
             # 从消息段中提取纯文本（排除引用部分）
             trailing_text = self._get_text_from_message_chain(event) or self._get_trailing_text(raw)
             logger.debug("引用消息后续文本: %s", trailing_text)
@@ -520,7 +489,7 @@ class SmartTranslator(Star):
                 trigger_match = REPLY_TRIGGER_RE.search(trailing_text)
                 if trigger_match:
                     target = self._extract_target_from_trigger(trailing_text)
-                    logger.debug("二次翻译触发: 目标语言=%s", target)
+                    logger.debug("引文翻译触发: 目标语言=%s", target)
                     
                     if not target:
                         # 没有指定目标语言，使用默认目标语言
@@ -528,21 +497,26 @@ class SmartTranslator(Star):
                         logger.debug("[引用消息] 使用默认目标语言: %s", target)
                     
                     # 从缓存获取首次翻译的原文
-                    cached_source = self._get_cached_source(event)
-                    if cached_source:
-                        return TranslationRequest(
-                            source_text=cached_source,
-                            target_lang=target,
-                            source_lang=_detect_language(cached_source),
-                        )
+                    quote_message_id = self._get_reply_message_id(quote_message)
+                    if quote_message_id:
+                        cached_source = self._translation_cache.get(str(quote_message_id))
+                        if cached_source:
+                            return TranslationRequest(
+                                source_text=cached_source,
+                                target_lang=target,
+                                source_lang=_detect_language(cached_source),
+                            )
                     
-                    # 缓存过期或不存在，返回失败标记
+                    # 缓存过期或不存在，直接翻译引文
                     logger.debug("[引用消息] 缓存未命中或已过期")
-                    return TranslationRequest(
-                        source_text=None,
-                        target_lang=target,
-                        source_lang=None,
-                    )
+                    quote_message_str = self._get_reply_message_str(quote_message)
+                    if quote_message_str:
+                        return TranslationRequest(
+                            source_text=quote_message_str,
+                            target_lang=target,
+                            source_lang=_detect_language(quote_message_str)
+                        )
+
             # 引用消息但没有翻译触发词，不处理
             logger.debug("[引用消息] 无翻译触发词，跳过")
             return None
@@ -603,6 +577,25 @@ class SmartTranslator(Star):
             lang = _normalize_lang(match.group(1))
             logger.debug("提取目标语言: '%s' -> %s", match.group(1), lang)
             return lang
+        return None
+
+    def _get_reply_message(self, event: AstrMessageEvent) -> BaseMessageComponent | None:
+        """
+        获取引用的消息
+        """
+        msgs = event.message_obj.message
+        if msgs[0] and msgs[0].type == components.ComponentType.Reply:
+            return msgs[0]
+        return None
+
+    def _get_reply_message_id(self, msg_comp: components.BaseMessageComponent) -> int | None:
+        if msg_comp:
+            return getattr(msg_comp, "id", None)
+        return None
+
+    def _get_reply_message_str(self, msg_comp: components.BaseMessageComponent) -> str | None:
+        if msg_comp:
+            return getattr(msg_comp, "message_str", None)
         return None
 
     def _get_trailing_text(self, msg_str: str) -> Optional[str]:
@@ -709,7 +702,7 @@ class SmartTranslator(Star):
                 kwargs["chat_provider_id"] = self.provider_id
 
             resp = await self.context.llm_generate(**kwargs)
-            translation = self._extract_text(resp)
+            translation = self._extract_llm_translation_output(resp)
 
             if self.show_api_exchange:
                 logger.info("翻译响应 <= %s", _preview(translation or "<empty>"))
@@ -736,7 +729,7 @@ class SmartTranslator(Star):
                             system_prompt=self.system_prompt,
                             chat_provider_id=fallback_provider,
                         )
-                        translation = self._extract_text(resp)
+                        translation = self._extract_llm_translation_output(resp)
                         if translation:
                             translation = _clean_translation(translation)
                             return translation, f"[主翻译失败，采用备用: {fallback_provider}]"
@@ -766,7 +759,7 @@ class SmartTranslator(Star):
             instruction = f"Translate to {target_lang}:"
         return f"{instruction}\n\n{text.strip()}"
 
-    def _extract_text(self, resp: Any) -> str:
+    def _extract_llm_translation_output(self, resp: Any) -> str:
         if resp is None:
             return ""
         if isinstance(resp, str):
