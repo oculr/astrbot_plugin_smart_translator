@@ -13,7 +13,6 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.message import components
-from astrbot.core.message.components import BaseMessageComponent
 
 # 语言别名映射 (基于 Google Translate 支持的语言)
 LANG_ALIASES: Dict[str, str] = {
@@ -184,12 +183,12 @@ CACHE_MAX_SIZE = 100  # 最大缓存条目数（LRU 淘汰）
 
 class LRUCache:
     """简单的 LRU 缓存实现，带 TTL 支持."""
-    
+
     def __init__(self, max_size: int = 100, ttl_seconds: int = 900):
         self._cache: OrderedDict[str, Tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
         self._ttl_seconds = ttl_seconds
-    
+
     def get(self, key: str) -> Optional[Any]:
         if key not in self._cache:
             return None
@@ -200,7 +199,7 @@ class LRUCache:
         # 移动到末尾（最近使用）
         self._cache.move_to_end(key)
         return value
-    
+
     def set(self, key: str, value: Any) -> None:
         if key in self._cache:
             del self._cache[key]
@@ -208,15 +207,15 @@ class LRUCache:
         # 超出容量时移除最旧的
         while len(self._cache) > self._max_size:
             self._cache.popitem(last=False)
-    
+
     def set_ttl(self, ttl_seconds: int) -> None:
         self._ttl_seconds = ttl_seconds
-    
+
     def cleanup_expired(self) -> int:
         """清理所有过期条目，返回清理数量."""
         now = time.time()
         expired_keys = [
-            k for k, (_, ts) in self._cache.items() 
+            k for k, (_, ts) in self._cache.items()
             if now - ts > self._ttl_seconds
         ]
         for k in expired_keys:
@@ -251,7 +250,7 @@ def _detect_language(text: str) -> str:
     """基于字符集统计检测文本主要语言（单次遍历）."""
     if not text:
         return "auto"
-    
+
     counts = {"zh": 0, "ja": 0, "ko": 0, "ru": 0, "en": 0}
     for char in text:
         code = ord(char)
@@ -265,7 +264,7 @@ def _detect_language(text: str) -> str:
             counts["ru"] += 1
         elif (0x0041 <= code <= 0x005A) or (0x0061 <= code <= 0x007A):
             counts["en"] += 1
-    
+
     lang, count = max(counts.items(), key=lambda x: x[1])
     return lang if count > 0 else "auto"
 
@@ -288,15 +287,15 @@ def _clean_translation(text: str) -> str:
     if not text:
         return ""
     result = text.strip()
-    
+
     for pattern in _CLEAN_PATTERNS:
         result = pattern.sub("", result).strip()
-    
+
     result = _URL_PATTERN.sub("", result).strip()
     result = _MARKDOWN_LINK_PATTERN.sub(r"\1", result)
     result = _CITATION_PATTERN.sub("", result).strip()
     result = _MULTI_NEWLINE_PATTERN.sub("\n", result)
-    
+
     return result.strip()
 
 
@@ -313,7 +312,7 @@ class TranslationBackendError(RuntimeError):
 
 class SmartTranslator(Star):
     """基于 LLM 的自然语言翻译插件."""
-    
+
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
         self.config: Dict[str, Any] = config or {}
@@ -356,7 +355,7 @@ class SmartTranslator(Star):
             self.cache_ttl_minutes = int(_clean_str(interaction.get("cache_ttl_minutes")) or "15")
         except ValueError:
             self.cache_ttl_minutes = 15
-        
+
         # 更新缓存 TTL
         self._translation_cache.set_ttl(self.cache_ttl_minutes * 60)
 
@@ -388,7 +387,7 @@ class SmartTranslator(Star):
         request = self._parse_request(event)
         if not request:
             return  # 不触发翻译，让消息继续传递
-        
+
         # 检查是否是二次翻译失败的情况
         if not request.source_text:
             event.stop_event()
@@ -465,7 +464,7 @@ class SmartTranslator(Star):
         cache_key = self._get_cache_key(event)
         if not cache_key:
             return None
-        
+
         source_text = self._translation_cache.get(cache_key)
         if source_text:
             logger.debug("使用缓存原文进行二次翻译: %s", _preview(source_text, 50))
@@ -484,18 +483,18 @@ class SmartTranslator(Star):
             # 从消息段中提取纯文本（排除引用部分）
             trailing_text = self._get_text_from_message_chain(event) or self._get_trailing_text(raw)
             logger.debug("引用消息后续文本: %s", trailing_text)
-            
+
             if trailing_text:
                 trigger_match = REPLY_TRIGGER_RE.search(trailing_text)
                 if trigger_match:
                     target = self._extract_target_from_trigger(trailing_text)
                     logger.debug("引文翻译触发: 目标语言=%s", target)
-                    
+
                     if not target:
                         # 没有指定目标语言，使用默认目标语言
                         target = self.default_target_lang
                         logger.debug("[引用消息] 使用默认目标语言: %s", target)
-                    
+
                     # 从缓存获取首次翻译的原文
                     quote_message_id = self._get_reply_message_id(quote_message)
                     if quote_message_id:
@@ -506,7 +505,7 @@ class SmartTranslator(Star):
                                 target_lang=target,
                                 source_lang=_detect_language(cached_source),
                             )
-                    
+
                     # 缓存过期或不存在，直接翻译引文
                     logger.debug("[引用消息] 缓存未命中或已过期")
                     quote_message_str = self._get_reply_message_str(quote_message)
@@ -579,7 +578,7 @@ class SmartTranslator(Star):
             return lang
         return None
 
-    def _get_reply_message(self, event: AstrMessageEvent) -> BaseMessageComponent | None:
+    def _get_reply_message(self, event: AstrMessageEvent) -> components.BaseMessageComponent | None:
         """
         获取引用的消息
         """
@@ -611,14 +610,14 @@ class SmartTranslator(Star):
             trailing = msg_str[last_bracket_space + 3:].strip()
             if trailing:
                 return trailing
-        
+
         # 2. 尝试 CQHTTP 格式: "[CQ:reply,id=xxx]后续文本"
         cq_match = re.search(r"\[CQ:reply,[^\]]*\](.+)$", msg_str)
         if cq_match:
             trailing = cq_match.group(1).strip()
             if trailing:
                 return trailing
-        
+
         return None
 
     def _get_text_from_message_chain(self, event: AstrMessageEvent) -> Optional[str]:
@@ -630,11 +629,11 @@ class SmartTranslator(Star):
             msg_obj = getattr(event, "message_obj", None)
             if not msg_obj:
                 return None
-            
+
             message_chain = getattr(msg_obj, "message", None) or getattr(msg_obj, "message_chain", None)
             if not message_chain:
                 return None
-            
+
             text_parts = []
             for seg in message_chain:
                 # 获取段类型 - 可能是字符串、枚举或其他类型
@@ -644,47 +643,47 @@ class SmartTranslator(Star):
                 else:
                     seg_type = getattr(seg, "type", "")
                     seg_data = getattr(seg, "data", {}) or {}
-                
+
                 # 将类型转换为字符串进行比较（处理枚举类型）
                 seg_type_str = str(seg_type).lower()
-                
+
                 # 匹配 text/plain 类型的消息段
                 is_text_type = any(t in seg_type_str for t in ("text", "plain"))
-                
+
                 if is_text_type:
                     # 尝试多种方式获取文本内容
                     text_content = None
-                    
+
                     # 方式1: 从 data 字典获取
                     if isinstance(seg_data, dict):
                         text_content = seg_data.get("text", "")
-                    
+
                     # 方式2: 从 seg.text 属性获取
                     if not text_content and hasattr(seg, "text"):
                         text_content = getattr(seg, "text", "")
-                    
+
                     # 方式3: 从 seg.data.text 获取（如果 data 是对象）
                     if not text_content and hasattr(seg_data, "text"):
                         text_content = getattr(seg_data, "text", "")
-                    
+
                     if text_content:
                         text_parts.append(str(text_content))
                         logger.debug("[消息链] 从 %s 段提取文本: %s", seg_type_str, text_content[:50])
-            
+
             if text_parts:
                 result = "".join(text_parts).strip()
                 logger.debug("从消息链提取纯文本: %s", result)
                 return result if result else None
         except Exception as e:
             logger.debug("消息链提取失败: %s", e)
-        
+
         return None
 
     async def _do_translate(
-        self,
-        text: str,
-        target_lang: str,
-        source_lang: str,
+            self,
+            text: str,
+            target_lang: str,
+            source_lang: str,
     ) -> Tuple[str, Optional[str]]:
         """执行翻译."""
         prompt = self._build_prompt(text, target_lang, source_lang)
@@ -800,7 +799,7 @@ class SmartTranslator(Star):
         return ""
 
     def _format_output(
-        self, translation: str, source_lang: str, target_lang: str, source_text: str = ""
+            self, translation: str, source_lang: str, target_lang: str, source_text: str = ""
     ) -> str:
         if self.output_mode == "plain":
             return translation
@@ -810,4 +809,3 @@ class SmartTranslator(Star):
         if source_lang and source_lang != "auto":
             return f"[{source_lang}->{target_lang}] {translation}"
         return f"[->{target_lang}] {translation}"
-
