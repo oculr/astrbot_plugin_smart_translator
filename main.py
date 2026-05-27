@@ -150,8 +150,6 @@ TEXT_THEN_TRANSLATE_RE = re.compile(
     r"^(?P<text>.+?)\s*(?:翻译|译)(?:成|为|到)(?P<lang>[A-Za-z]{2,}|[\u4e00-\u9fff]{1,4})(?:文|语)?[。？?!！]?$",
     flags=re.DOTALL,
 )
-# 回复消息触发（用于引用消息的二次翻译）
-REPLY_TRIGGER_RE = re.compile(r"(再翻译|翻译|翻成|译一下|译成|translate)", flags=re.IGNORECASE)
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a translation engine. "
@@ -485,16 +483,17 @@ class SmartTranslator(Star):
             logger.debug("引用消息后续文本: %s", trailing_text)
 
             if trailing_text:
-                trigger_match = REPLY_TRIGGER_RE.search(trailing_text)
-                if trigger_match:
+                target = None
+                if "翻译" == trailing_text:
+                    # 没有指定目标语言，使用默认目标语言
+                    target = self.default_target_lang
+                    logger.debug("[引用消息] 使用默认目标语言: %s", target)
+                else:
                     target = self._extract_target_from_trigger(trailing_text)
-                    logger.debug("引文翻译触发: 目标语言=%s", target)
+                    if target:
+                        logger.debug("引文翻译触发: 目标语言=%s", target)
 
-                    if not target:
-                        # 没有指定目标语言，使用默认目标语言
-                        target = self.default_target_lang
-                        logger.debug("[引用消息] 使用默认目标语言: %s", target)
-
+                if target:
                     # 从缓存获取首次翻译的原文
                     quote_message_id = self._get_reply_message_id(quote_message)
                     if quote_message_id:
